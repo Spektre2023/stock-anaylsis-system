@@ -10,6 +10,7 @@
     table { border-collapse: collapse; width: 100%; font-size: 14px; }
     th, td { border-bottom: 1px solid #eee; padding: 8px; vertical-align: top; }
     th { text-align: left; position: sticky; top: 0; background: #fff; z-index: 1; }
+    th.nowrap, td.nowrap { white-space: nowrap; }
 
     /* Pills */
     .pill { display:inline-block; padding:2px 8px; border-radius: 999px; border:1px solid #ddd; font-weight: 600; }
@@ -39,7 +40,21 @@
     tr.big-mover { background: #fff8e1; }
     .star { display:inline-block; font-size: 14px; margin-right: 6px; }
 
-    /* Momentum colouring */
+    /* Winners/Losers pinned highlight */
+    tr.pin-winner { background: #f0fff4; }
+    tr.pin-loser  { background: #fff5f5; }
+
+    /* Section separators */
+    tr.section td {
+      background:#fafafa;
+      border-top: 1px solid #eee;
+      border-bottom: 1px solid #eee;
+      font-weight: 700;
+      color:#444;
+      padding-top:10px; padding-bottom:10px;
+    }
+
+    /* Up/Down colouring */
     .pos { color:#156b2a; font-weight:600; }
     .neg { color:#8a1f1f; font-weight:600; }
 
@@ -51,11 +66,16 @@
     .sw-sell { background:#d23b3b; }
     .sw-hold { background:#9aa3af; }
     .sw-move { background:#ffd54f; border:1px solid #e7c23b; }
+
+    .hint { margin-top: 6px; font-size: 12px; color:#666; }
   </style>
 </head>
 <body>
   <h1>Stock Analysis Dashboard (Paper Trading)</h1>
   <div class="meta" id="meta">Loading…</div>
+  <div class="hint">
+    “Pred Close (1D)” is a conservative estimate using your 1-day range + action direction. It is not guaranteed.
+  </div>
 
   <div class="filters">
     <label>Region
@@ -92,11 +112,15 @@
     <thead>
       <tr>
         <th>Ticker</th>
-        <th>Region</th>
+        <th class="nowrap">Region</th>
         <th>Category</th>
-        <th>Action</th>
-        <th>Confidence</th>
-        <th>Last Close</th>
+        <th class="nowrap">Action</th>
+        <th class="nowrap">Confidence</th>
+        <th class="nowrap">Prev Close</th>
+        <th class="nowrap">Today Close</th>
+        <th class="nowrap">Change</th>
+        <th class="nowrap">Change %</th>
+        <th class="nowrap">Pred Close (1D)</th>
         <th>Ranges (approx)</th>
         <th>Notes</th>
       </tr>
@@ -151,13 +175,68 @@ function safeNum(x, dp=2){
   return (typeof x === 'number' && isFinite(x)) ? x.toFixed(dp) : '—';
 }
 
+function getDailyChange(ticker, fallbackTodayClose){
+  const arr = (window.SNAP.prices && window.SNAP.prices[ticker]) ? window.SNAP.prices[ticker] : null;
+  if(!arr || arr.length < 2){
+    const today = (typeof fallbackTodayClose === 'number') ? fallbackTodayClose : null;
+    return { prevClose: null, todayClose: today, change: null, changePct: null };
+  }
+  const last = arr[arr.length - 1];
+  const prev = arr[arr.length - 2];
+  const todayClose = (typeof last.Close === 'number') ? last.Close : (typeof fallbackTodayClose === 'number' ? fallbackTodayClose : null);
+  const prevClose = (typeof prev.Close === 'number') ? prev.Close : null;
+
+  if(todayClose == null || prevClose == null || prevClose === 0){
+    return { prevClose, todayClose, change: null, changePct: null };
+  }
+
+  const change = todayClose - prevClose;
+  const changePct = (change / prevClose) * 100;
+  return { prevClose, todayClose, change, changePct };
+}
+
+/**
+ * Conservative 1D predicted close estimate:
+ * - Uses range_1d high/low as the typical 1-day move bounds
+ * - Direction comes from action (BUY/SELL/HOLD) with a conservative multiplier
+ */
+function predictedClose1D(todayClose, row){
+  const r = row.range_1d;
+  if(todayClose == null || !r || r.low==null || r.high==null) return null;
+
+  const act = (row.action || '').toUpperCase();
+  const hi = r.high; // positive
+  const lo = r.low;  // negative
+
+  let expectedPct = 0;
+
+  // Conservative multipliers so this doesn't look overconfident
+  if(act === 'BUY') expectedPct = hi * 0.60;
+  else if(act === 'SELL') expectedPct = lo * 0.60;
+  else {
+    // HOLD = near 0, slight lean in direction of trend if available
+    const mid = (hi + lo) / 2;
+    if(row.trend === 1) expectedPct = Math.max(0, hi * 0.20);
+    else if(row.trend === -1) expectedPct = Math.min(0, lo * 0.20);
+    else expectedPct = mid * 0.10;
+  }
+
+  return todayClose * (1 + expectedPct);
+}
+
+function addSectionRow(tbody, label){
+  const tr = document.createElement('tr');
+  tr.className = 'section';
+  tr.innerHTML = `<td colspan="12">${label}</td>`;
+  tbody.appendChild(tr);
+}
+
 function render(){
   const region = document.getElementById('region').value;
   const category = document.getElementById('category').value;
   const action = document.getElementById('action').value;
   const q = document.getElementById('q').value.trim().toUpperCase();
 
-  // Filtered rows (what we render)
   const rows = window.SNAP.rows.filter(r=>{
     if(region && r.region !== region) return false;
     if(category && r.category !== category) return false;
@@ -166,75 +245,124 @@ function render(){
     return true;
   });
 
-  // Compute "Top 5 biggest expected 1W movers" *within the filtered view*
+  // Top 5 biggest expected 1W movers (within filtered view)
   const movers = rows
     .map(r => ({ ticker: r.ticker, mag: moveMag(r.range_1w) }))
     .filter(x => x.mag != null)
     .sort((a,b)=> b.mag - a.mag)
     .slice(0, 5);
-
   const moverSet = new Set(movers.map(m => m.ticker));
 
-  // Sort by confidence descending (as before)
-  rows.sort((a,b)=> (b.confidence||0)-(a.confidence||0));
+  // Compute daily change info so we can pin winners/losers
+  const enriched = rows.map(r=>{
+    const dc = getDailyChange(r.ticker, r.last_close);
+    return { r, dc };
+  });
+
+  const winners = enriched
+    .filter(x => typeof x.dc.changePct === 'number')
+    .sort((a,b)=> b.dc.changePct - a.dc.changePct)
+    .slice(0, 5);
+
+  const losers = enriched
+    .filter(x => typeof x.dc.changePct === 'number')
+    .sort((a,b)=> a.dc.changePct - b.dc.changePct)
+    .slice(0, 5);
+
+  const pinnedSet = new Set([...winners, ...losers].map(x => x.r.ticker));
+
+  // Remaining rows (not pinned), sorted by confidence desc (as before)
+  const rest = enriched
+    .filter(x => !pinnedSet.has(x.r.ticker))
+    .sort((a,b)=> (b.r.confidence||0) - (a.r.confidence||0));
 
   const tb = document.getElementById('tbody');
   tb.innerHTML = '';
 
-  rows.forEach(r=>{
-    const tr=document.createElement('tr');
+  // Render pinned winners
+  if(winners.length){
+    addSectionRow(tb, "Top 5 Winners (Today)");
+    winners.forEach(x => renderRow(tb, x.r, x.dc, moverSet, true, false));
+  }
 
-    // Row class by action
-    const act = (r.action || '').toUpperCase();
-    if(act === 'BUY') tr.classList.add('row-buy');
-    else if(act === 'SELL') tr.classList.add('row-sell');
-    else tr.classList.add('row-hold');
+  // Render pinned losers
+  if(losers.length){
+    addSectionRow(tb, "Top 5 Losers (Today)");
+    losers.forEach(x => renderRow(tb, x.r, x.dc, moverSet, false, true));
+  }
 
-    // Big mover highlight
-    if(moverSet.has(r.ticker)) tr.classList.add('big-mover');
+  // Render the rest
+  addSectionRow(tb, "All Stocks");
+  rest.forEach(x => renderRow(tb, x.r, x.dc, moverSet, false, false));
+}
 
-    const pillClass = act === 'BUY' ? 'pill buy' : act === 'SELL' ? 'pill sell' : 'pill hold';
-    const pillText = act || '—';
-    const pill = `<span class="${pillClass}">${pillText}</span>`;
+function renderRow(tb, r, dc, moverSet, isWinnerPin, isLoserPin){
+  const tr = document.createElement('tr');
 
-    const conf = (typeof r.confidence === 'number') ? r.confidence : null;
-    const confBadge = `<span class="${confClass(conf)}">${conf ?? '—'}</span>`;
+  const act = (r.action || '').toUpperCase();
+  if(act === 'BUY') tr.classList.add('row-buy');
+  else if(act === 'SELL') tr.classList.add('row-sell');
+  else tr.classList.add('row-hold');
 
-    const notes = [];
-    if(r.trend===1) notes.push('Uptrend (MA50>MA200)');
-    if(r.trend===-1) notes.push('Downtrend (MA50<MA200)');
+  if(moverSet.has(r.ticker)) tr.classList.add('big-mover');
+  if(isWinnerPin) tr.classList.add('pin-winner');
+  if(isLoserPin) tr.classList.add('pin-loser');
 
-    if(r.mom_6m!=null && typeof r.mom_6m === 'number') {
-      const v = (r.mom_6m*100);
-      notes.push(`6M mom: <span class="${v>=0?'pos':'neg'}">${v.toFixed(1)}%</span>`);
-    }
+  const pillClass = act === 'BUY' ? 'pill buy' : act === 'SELL' ? 'pill sell' : 'pill hold';
+  const pillText = act || '—';
+  const pill = `<span class="${pillClass}">${pillText}</span>`;
 
-    if(r.vol_20d_ann!=null && typeof r.vol_20d_ann === 'number') notes.push(`Vol: ${(r.vol_20d_ann*100).toFixed(0)}%`);
-    if(r.rsi14!=null && typeof r.rsi14 === 'number') notes.push(`RSI: ${r.rsi14.toFixed(0)}`);
+  const conf = (typeof r.confidence === 'number') ? r.confidence : null;
+  const confBadge = `<span class="${confClass(conf)}">${conf ?? '—'}</span>`;
 
-    const firstNews = (window.SNAP.news && window.SNAP.news[r.ticker] || [])[0];
-    const newsHtml = firstNews
-      ? `<div class="news small">News: <a href="${firstNews.link}" target="_blank" rel="noreferrer">${firstNews.title}</a></div>`
-      : '';
+  const changeClass = (typeof dc.change === 'number')
+    ? (dc.change > 0 ? 'pos' : (dc.change < 0 ? 'neg' : ''))
+    : '';
+  const changeTxt = (typeof dc.change === 'number') ? `${dc.change > 0 ? '+' : ''}${dc.change.toFixed(2)}` : '—';
+  const changePctTxt = (typeof dc.changePct === 'number') ? `${dc.changePct > 0 ? '+' : ''}${dc.changePct.toFixed(2)}%` : '—';
 
-    const star = moverSet.has(r.ticker) ? `<span class="star" title="Top 5 expected 1W movers">⭐</span>` : '';
+  const pred = predictedClose1D(dc.todayClose, r);
+  const predTxt = (typeof pred === 'number') ? pred.toFixed(2) : '—';
+  const predClass = (typeof pred === 'number' && typeof dc.todayClose === 'number')
+    ? (pred > dc.todayClose ? 'pos' : (pred < dc.todayClose ? 'neg' : ''))
+    : '';
 
-    tr.innerHTML = `
-      <td>${star}<b>${r.ticker ?? '—'}</b>${newsHtml}</td>
-      <td>${(r.region ? String(r.region).toUpperCase() : '—')}</td>
-      <td>${r.category ?? '—'}</td>
-      <td>${pill}</td>
-      <td>${confBadge}</td>
-      <td>${safeNum(r.last_close, 2)}</td>
-      <td class="small">
-        1D: ${fmtPctRange(r.range_1d)}<br/>
-        1W: ${fmtPctRange(r.range_1w)}<br/>
-        1M: ${fmtPctRange(r.range_1m)}
-      </td>
-      <td class="small">${notes.join(' • ')}</td>
-    `;
-    tb.appendChild(tr);
-  });
+  const notes = [];
+  if(r.trend===1) notes.push('Uptrend (MA50>MA200)');
+  if(r.trend===-1) notes.push('Downtrend (MA50<MA200)');
+  if(r.mom_6m!=null && typeof r.mom_6m === 'number') {
+    const v = (r.mom_6m*100);
+    notes.push(`6M mom: <span class="${v>=0?'pos':'neg'}">${v.toFixed(1)}%</span>`);
+  }
+  if(r.vol_20d_ann!=null && typeof r.vol_20d_ann === 'number') notes.push(`Vol: ${(r.vol_20d_ann*100).toFixed(0)}%`);
+  if(r.rsi14!=null && typeof r.rsi14 === 'number') notes.push(`RSI: ${r.rsi14.toFixed(0)}`);
+
+  const firstNews = (window.SNAP.news && window.SNAP.news[r.ticker] || [])[0];
+  const newsHtml = firstNews
+    ? `<div class="news small">News: <a href="${firstNews.link}" target="_blank" rel="noreferrer">${firstNews.title}</a></div>`
+    : '';
+
+  const star = moverSet.has(r.ticker) ? `<span class="star" title="Top 5 expected 1W movers">⭐</span>` : '';
+
+  tr.innerHTML = `
+    <td>${star}<b>${r.ticker ?? '—'}</b>${newsHtml}</td>
+    <td class="nowrap">${(r.region ? String(r.region).toUpperCase() : '—')}</td>
+    <td>${r.category ?? '—'}</td>
+    <td class="nowrap">${pill}</td>
+    <td class="nowrap">${confBadge}</td>
+    <td class="nowrap">${safeNum(dc.prevClose, 2)}</td>
+    <td class="nowrap">${safeNum(dc.todayClose, 2)}</td>
+    <td class="nowrap"><span class="${changeClass}">${changeTxt}</span></td>
+    <td class="nowrap"><span class="${changeClass}">${changePctTxt}</span></td>
+    <td class="nowrap"><span class="${predClass}">${predTxt}</span></td>
+    <td class="small">
+      1D: ${fmtPctRange(r.range_1d)}<br/>
+      1W: ${fmtPctRange(r.range_1w)}<br/>
+      1M: ${fmtPctRange(r.range_1m)}
+    </td>
+    <td class="small">${notes.join(' • ')}</td>
+  `;
+  tb.appendChild(tr);
 }
 
 load();
