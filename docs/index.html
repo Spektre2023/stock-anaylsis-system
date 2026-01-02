@@ -9,15 +9,48 @@
     .meta { color:#555; margin-bottom: 10px; }
     table { border-collapse: collapse; width: 100%; font-size: 14px; }
     th, td { border-bottom: 1px solid #eee; padding: 8px; vertical-align: top; }
-    th { text-align: left; position: sticky; top: 0; background: #fff; }
-    .pill { display:inline-block; padding:2px 8px; border-radius: 999px; border:1px solid #ddd; }
-    .buy { font-weight:700; }
-    .sell { font-weight:700; }
+    th { text-align: left; position: sticky; top: 0; background: #fff; z-index: 1; }
+
+    /* Pills */
+    .pill { display:inline-block; padding:2px 8px; border-radius: 999px; border:1px solid #ddd; font-weight: 600; }
+    .pill.buy  { background: #eaf7ee; border-color:#bfe6c7; color:#156b2a; }
+    .pill.sell { background: #fdecec; border-color:#f3b6b6; color:#8a1f1f; }
+    .pill.hold { background: #f3f4f6; border-color:#e1e3e8; color:#3b3f46; }
+
+    /* Confidence badges */
+    .conf { display:inline-block; padding:2px 8px; border-radius: 999px; border:1px solid #ddd; font-weight: 600; }
+    .conf.high { background:#eaf7ee; border-color:#bfe6c7; color:#156b2a; }
+    .conf.med  { background:#fff7e6; border-color:#f1d39b; color:#7a4b00; }
+    .conf.low  { background:#fdecec; border-color:#f3b6b6; color:#8a1f1f; }
+
     .small { font-size: 12px; color:#666; }
-    .filters { display:flex; gap:10px; flex-wrap:wrap; margin:10px 0 14px; }
+    .filters { display:flex; gap:10px; flex-wrap:wrap; margin:10px 0 10px; }
     select, input { padding: 6px 8px; font-size: 14px; }
     .news { margin-top: 4px; }
     .news a { text-decoration:none; }
+    .news a:hover { text-decoration:underline; }
+
+    /* Row accents by action */
+    tr.row-buy  td:first-child { border-left: 4px solid #2e9b4e; padding-left: 10px; }
+    tr.row-sell td:first-child { border-left: 4px solid #d23b3b; padding-left: 10px; }
+    tr.row-hold td:first-child { border-left: 4px solid #9aa3af; padding-left: 10px; }
+
+    /* Big mover highlight (top 5 by expected 1W move) */
+    tr.big-mover { background: #fff8e1; }
+    .star { display:inline-block; font-size: 14px; margin-right: 6px; }
+
+    /* Momentum colouring */
+    .pos { color:#156b2a; font-weight:600; }
+    .neg { color:#8a1f1f; font-weight:600; }
+
+    /* Legend */
+    .legend { display:flex; gap:10px; flex-wrap:wrap; margin: 8px 0 14px; }
+    .legend .item { display:flex; align-items:center; gap:6px; color:#444; font-size:12px; }
+    .swatch { width:10px; height:10px; border-radius:2px; display:inline-block; }
+    .sw-buy { background:#2e9b4e; }
+    .sw-sell { background:#d23b3b; }
+    .sw-hold { background:#9aa3af; }
+    .sw-move { background:#ffd54f; border:1px solid #e7c23b; }
   </style>
 </head>
 <body>
@@ -48,6 +81,13 @@
     </label>
   </div>
 
+  <div class="legend">
+    <div class="item"><span class="swatch sw-buy"></span> BUY</div>
+    <div class="item"><span class="swatch sw-sell"></span> SELL</div>
+    <div class="item"><span class="swatch sw-hold"></span> HOLD</div>
+    <div class="item"><span class="swatch sw-move"></span> ⭐ Top 5 biggest expected 1W movers</div>
+  </div>
+
   <table>
     <thead>
       <tr>
@@ -64,7 +104,7 @@
     <tbody id="tbody"></tbody>
   </table>
 
-  <p class="small">Data source: Stooq (prices) + Google News RSS (headlines). Paper-trading research only.</p>
+  <p class="small">Data source: Stooq/Yahoo (prices) + Google News RSS (headlines). Paper-trading research only.</p>
 
 <script>
 async function load() {
@@ -75,8 +115,9 @@ async function load() {
   initFilters(snap.rows);
   render();
 }
+
 function initFilters(rows){
-  const cats = Array.from(new Set(rows.map(r=>r.category))).sort();
+  const cats = Array.from(new Set(rows.map(r=>r.category).filter(Boolean))).sort();
   const sel = document.getElementById('category');
   cats.forEach(c=>{
     const o=document.createElement('option'); o.value=c; o.textContent=c; sel.appendChild(o);
@@ -86,45 +127,105 @@ function initFilters(rows){
     document.getElementById(id).addEventListener('change', render);
   });
 }
+
 function fmtPctRange(r){
-  if(!r) return '';
+  if(!r || r.low==null || r.high==null) return '—';
   const lo = (r.low*100).toFixed(1);
   const hi = (r.high*100).toFixed(1);
   return `${lo}% to ${hi}%`;
 }
+
+function moveMag(range){
+  if(!range || range.low==null || range.high==null) return null;
+  return Math.max(Math.abs(range.low), Math.abs(range.high));
+}
+
+function confClass(c){
+  if(typeof c !== 'number') return 'conf low';
+  if(c >= 70) return 'conf high';
+  if(c >= 50) return 'conf med';
+  return 'conf low';
+}
+
+function safeNum(x, dp=2){
+  return (typeof x === 'number' && isFinite(x)) ? x.toFixed(dp) : '—';
+}
+
 function render(){
   const region = document.getElementById('region').value;
   const category = document.getElementById('category').value;
   const action = document.getElementById('action').value;
   const q = document.getElementById('q').value.trim().toUpperCase();
+
+  // Filtered rows (what we render)
   const rows = window.SNAP.rows.filter(r=>{
     if(region && r.region !== region) return false;
     if(category && r.category !== category) return false;
     if(action && r.action !== action) return false;
-    if(q && !r.ticker.toUpperCase().includes(q)) return false;
+    if(q && !String(r.ticker||'').toUpperCase().includes(q)) return false;
     return true;
-  }).sort((a,b)=> (b.confidence||0)-(a.confidence||0));
+  });
+
+  // Compute "Top 5 biggest expected 1W movers" *within the filtered view*
+  const movers = rows
+    .map(r => ({ ticker: r.ticker, mag: moveMag(r.range_1w) }))
+    .filter(x => x.mag != null)
+    .sort((a,b)=> b.mag - a.mag)
+    .slice(0, 5);
+
+  const moverSet = new Set(movers.map(m => m.ticker));
+
+  // Sort by confidence descending (as before)
+  rows.sort((a,b)=> (b.confidence||0)-(a.confidence||0));
 
   const tb = document.getElementById('tbody');
   tb.innerHTML = '';
+
   rows.forEach(r=>{
     const tr=document.createElement('tr');
-    const pill = `<span class="pill ${r.action==='BUY'?'buy':''} ${r.action==='SELL'?'sell':''}">${r.action}</span>`;
+
+    // Row class by action
+    const act = (r.action || '').toUpperCase();
+    if(act === 'BUY') tr.classList.add('row-buy');
+    else if(act === 'SELL') tr.classList.add('row-sell');
+    else tr.classList.add('row-hold');
+
+    // Big mover highlight
+    if(moverSet.has(r.ticker)) tr.classList.add('big-mover');
+
+    const pillClass = act === 'BUY' ? 'pill buy' : act === 'SELL' ? 'pill sell' : 'pill hold';
+    const pillText = act || '—';
+    const pill = `<span class="${pillClass}">${pillText}</span>`;
+
+    const conf = (typeof r.confidence === 'number') ? r.confidence : null;
+    const confBadge = `<span class="${confClass(conf)}">${conf ?? '—'}</span>`;
+
     const notes = [];
     if(r.trend===1) notes.push('Uptrend (MA50>MA200)');
     if(r.trend===-1) notes.push('Downtrend (MA50<MA200)');
-    if(r.mom_6m!=null) notes.push(`6M mom: ${(r.mom_6m*100).toFixed(1)}%`);
-    if(r.vol_20d_ann!=null) notes.push(`Vol: ${(r.vol_20d_ann*100).toFixed(0)}%`);
-    if(r.rsi14!=null) notes.push(`RSI: ${r.rsi14.toFixed(0)}`);
-    const firstNews = (window.SNAP.news[r.ticker]||[])[0];
-    const newsHtml = firstNews ? `<div class="news small">News: <a href="${firstNews.link}" target="_blank" rel="noreferrer">${firstNews.title}</a></div>` : '';
+
+    if(r.mom_6m!=null && typeof r.mom_6m === 'number') {
+      const v = (r.mom_6m*100);
+      notes.push(`6M mom: <span class="${v>=0?'pos':'neg'}">${v.toFixed(1)}%</span>`);
+    }
+
+    if(r.vol_20d_ann!=null && typeof r.vol_20d_ann === 'number') notes.push(`Vol: ${(r.vol_20d_ann*100).toFixed(0)}%`);
+    if(r.rsi14!=null && typeof r.rsi14 === 'number') notes.push(`RSI: ${r.rsi14.toFixed(0)}`);
+
+    const firstNews = (window.SNAP.news && window.SNAP.news[r.ticker] || [])[0];
+    const newsHtml = firstNews
+      ? `<div class="news small">News: <a href="${firstNews.link}" target="_blank" rel="noreferrer">${firstNews.title}</a></div>`
+      : '';
+
+    const star = moverSet.has(r.ticker) ? `<span class="star" title="Top 5 expected 1W movers">⭐</span>` : '';
+
     tr.innerHTML = `
-      <td><b>${r.ticker}</b>${newsHtml}</td>
-      <td>${r.region.toUpperCase()}</td>
-      <td>${r.category}</td>
+      <td>${star}<b>${r.ticker ?? '—'}</b>${newsHtml}</td>
+      <td>${(r.region ? String(r.region).toUpperCase() : '—')}</td>
+      <td>${r.category ?? '—'}</td>
       <td>${pill}</td>
-      <td>${r.confidence}</td>
-      <td>${(typeof r.last_close === 'number') ? r.last_close.toFixed(2) : r.last_close}</td>
+      <td>${confBadge}</td>
+      <td>${safeNum(r.last_close, 2)}</td>
       <td class="small">
         1D: ${fmtPctRange(r.range_1d)}<br/>
         1W: ${fmtPctRange(r.range_1w)}<br/>
@@ -135,6 +236,7 @@ function render(){
     tb.appendChild(tr);
   });
 }
+
 load();
 </script>
 </body>
