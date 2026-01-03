@@ -11,6 +11,10 @@ on:
       - "requirements.txt"
       - ".github/workflows/daily.yml"
 
+concurrency:
+  group: daily-snapshot-main
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
@@ -45,8 +49,14 @@ jobs:
 
       - name: Commit snapshot + AI artifacts
         run: |
+          set -e
+
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
+
+          # Always rebase on latest main before committing (avoids non-fast-forward)
+          git fetch origin main
+          git rebase origin/main
 
           git add \
             docs/data/snapshot.json \
@@ -55,6 +65,15 @@ jobs:
             docs/data/history/*.jsonl \
             docs/data/history/index.json || true
 
-          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+
           git commit -m "Daily snapshot + AI briefing"
-          git push
+
+          # Rebase again just before push (handles last-second changes)
+          git fetch origin main
+          git rebase origin/main
+
+          git push origin HEAD:main
