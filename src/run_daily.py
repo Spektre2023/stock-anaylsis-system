@@ -29,6 +29,7 @@ def json_safe(obj):
 
 def stooq_symbol(ticker: str) -> str:
     # Stooq symbols are lower-case. Examples: aapl.us, xro.au
+    # Your universe uses Yahoo-style tickers like AAPL, MSFT, and ASX like XYZ.AX
     if ticker.endswith(".AX"):
         return ticker.replace(".AX", "").lower() + ".au"
     return ticker.lower() + ".us"
@@ -41,8 +42,19 @@ def fetch_stooq_daily(ticker: str, days: int = 420) -> pd.DataFrame:
     r.raise_for_status()
 
     df = pd.read_csv(io.StringIO(r.text))
-    df["Date"] = pd.to_datetime(df["Date"])
-    df = df.sort_values("Date").tail(days).reset_index(drop=True)
+    if "Date" not in df.columns:
+        raise ValueError("Stooq response missing Date column")
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df = df.dropna(subset=["Date"]).sort_values("Date").tail(days).reset_index(drop=True)
+
+    # Ensure expected OHLC columns exist
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        if col not in df.columns:
+            # Some tickers might not have Volume etc; keep going but Close must exist
+            if col == "Close":
+                raise KeyError("Close column missing")
+            df[col] = pd.NA
+
     df["Ticker"] = ticker
     return df
 
@@ -92,11 +104,7 @@ def compute_signals(df: pd.DataFrame) -> dict:
     latest = df.iloc[-1]
     trend = 0
     if pd.notna(latest["ma50"]) and pd.notna(latest["ma200"]):
-        trend = (
-            1
-            if latest["ma50"] > latest["ma200"]
-            else (-1 if latest["ma50"] < latest["ma200"] else 0)
-        )
+        trend = 1 if latest["ma50"] > latest["ma200"] else (-1 if latest["ma50"] < latest["ma200"] else 0)
 
     r63 = (close.iloc[-1] / close.iloc[-64] - 1) if len(close) > 64 else float("nan")
     r126 = (close.iloc[-1] / close.iloc[-127] - 1) if len(close) > 127 else float("nan")
@@ -153,60 +161,67 @@ def horizon_ranges(sig: dict) -> dict:
 def main():
     universe = json.loads(Path(CONFIG).read_text(encoding="utf-8"))
 
-    all_rows = []
-    news_blob = {}
-    prices_blob = {}
+    all_rows: list[dict] = []
+    news_blob: dict = {}
+    prices_blob: dict = {}
 
     for region, cats in universe.items():
         for cat, tickers in cats.items():
             for t in tickers:
                 try:
                     df = fetch_stooq_daily(t, days=420)
-                except Exception as e:
+                    sig = compute_signals(df)
+                    ranges = horizon_ranges(sig)
+
+                    # prices payload for dashboard daily-change calc
+                    df_out = df.tail(250).copy()
+                    df_out["Date"] = df_out["Date"].dt.strftime("%Y-%m-%d")
+                    # Keep only the columns the dashboard expects (Close is the important one)
+                    keep_cols = [c for c in ["Date", "Open", "High", "Low", "Close", "Volume"] if c in df_out.columns]
+                    df_out = df_out[keep_cols]
+                    prices_blob[t] = df_out.to_dict(orient="records")
+
+                    try:
+                        news_blob[t] = fetch_news_headlines(t)
+                    except Exception as e:
+                        news_blob[t] = [{"title": f"News fetch failed: {str(e)[:160]}", "link": "", "published": "", "source": ""}]
+
                     all_rows.append(
                         {
-                            "region": region,
-                            "category": cat,
-                            "ticker": t,
-                            "status": "NO_DATA",
-                            "error": str(e)[:160],
+                            "region": str(region).lower(),
+                            "category": str(cat),
+                            "ticker": str(t),
+                            **sig,
+                            "range_1d": ranges["1D"],
+                            "range_1w": ranges["1W"],
+                            "range_1m": ranges["1M"],
+                            "status": "OK",
                         }
                     )
-                    continue
 
-                sig = compute_signals(df)
-                ranges = horizon_ranges(sig)
-
-                # ✅ FIX: convert pandas Timestamp -> string BEFORE json dump
-                df_out = df.tail(250).copy()
-                df_out["Date"] = df_out["Date"].dt.strftime("%Y-%m-%d")
-                prices_blob[t] = df_out.to_dict(orient="records")
-
-                try:
-                    news_blob[t] = fetch_news_headlines(t)
                 except Exception as e:
-                    news_blob[t] = [
+                    # IMPORTANT: still emit a row so the dashboard/meta doesn't break
+                    all_rows.append(
                         {
-                            "title": f"News fetch failed: {str(e)[:160]}",
-                            "link": "",
-                            "published": "",
-                            "source": "",
+                            "region": str(region).lower(),
+                            "category": str(cat),
+                            "ticker": str(t),
+                            "status": "NO_DATA",
+                            "error": str(e)[:160],
+                            # safe defaults expected by dashboard render paths
+                            "action": "HOLD",
+                            "confidence": 0,
+                            "last_close": None,
+                            "trend": 0,
+                            "mom_3m": None,
+                            "mom_6m": None,
+                            "vol_20d_ann": None,
+                            "rsi14": None,
+                            "range_1d": None,
+                            "range_1w": None,
+                            "range_1m": None,
                         }
-                    ]
-
-                all_rows.append(
-                    {
-                        "region": region,
-                        "category": cat,
-                        "ticker": t,
-                        **sig,
-                        "range_1d": ranges["1D"],
-                        "range_1w": ranges["1W"],
-                        "range_1m": ranges["1M"],
-                        "status": "OK",
-                        "asof_utc": now_utc(),
-                    }
-                )
+                    )
 
                 time.sleep(0.2)
 
@@ -223,7 +238,6 @@ def main():
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # ✅ FIX: json.dumps(..., default=json_safe) to be extra safe
     (OUT_DIR / "snapshot.json").write_text(
         json.dumps(out, indent=2, default=json_safe),
         encoding="utf-8",
