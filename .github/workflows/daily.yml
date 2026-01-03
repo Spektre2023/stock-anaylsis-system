@@ -43,11 +43,18 @@ jobs:
         run: |
           python src/build_ai_artifacts.py
 
-      - name: Commit snapshot
+      - name: Commit snapshot + AI artifacts
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add docs/data/snapshot.json docs/data/snapshot.csv || true
+
+          git add \
+            docs/data/snapshot.json \
+            docs/data/snapshot.csv \
+            docs/data/ai_briefing.json \
+            docs/data/history/*.jsonl \
+            docs/data/history/index.json || true
+
           git diff --cached --quiet && echo "No changes to commit" && exit 0
-          git commit -m "Update snapshot"
+          git commit -m "Daily snapshot + AI briefing"
           git push
