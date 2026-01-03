@@ -53,14 +53,15 @@ jobs:
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
 
-          # Sync with remote to avoid "fetch first" rejections
-          git fetch origin main
-          git rebase origin/main
+          # Ensure we start from latest main BEFORE generating files
+          git pull --rebase origin main
 
-          git add docs/data/snapshot.json docs/data/snapshot.csv \
-                  docs/data/ai_briefing.json \
-                  docs/data/history/index.json \
-                  docs/data/history/*.jsonl || true
+          git add \
+            docs/data/snapshot.json \
+            docs/data/snapshot.csv \
+            docs/data/ai_briefing.json \
+            docs/data/history/index.json \
+            docs/data/history/*.jsonl || true
 
           if git diff --cached --quiet; then
             echo "No changes to commit"
@@ -69,8 +70,5 @@ jobs:
 
           git commit -m "Daily snapshot + AI briefing"
 
-          # Rebase again just before pushing (handles last-second changes)
-          git fetch origin main
-          git rebase origin/main
+          git push origin main
 
-          git push origin HEAD:main
